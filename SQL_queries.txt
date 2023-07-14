@@ -1,0 +1,798 @@
+-- Data Exploration in SQL
+-- Explore the Metrocar Data with SQL
+--1. How many times was the app downloaded? 
+-- 23608
+SELECT
+ COUNT(DISTINCT app_download_key) 
+FROM
+ app_downloads;
+ --2. How many users signed up on the app?
+-- 17623
+SELECT
+ COUNT(DISTINCT user_id) 
+FROM
+ signups;
+--3. How many rides were requested through the app?
+-- 385477
+SELECT
+ COUNT(DISTINCT ride_id) 
+FROM
+ ride_requests;
+ --4. How many rides were requested and completed through the app?
+-- requested - 385477, completed - 223652 
+SELECT
+ COUNT(DISTINCT ride_id) ride_requested,
+ (
+ SELECT
+ COUNT(DISTINCT ride_id) rides_completed 
+ FROM
+ ride_requests 
+ WHERE
+ dropoff_ts IS NOT NULL
+ )
+FROM
+ ride_requests;
+--5. How many rides were requested and how many unique users requested a ride?
+-- rides - 385477, uses - 12406
+SELECT
+ COUNT(DISTINCT ride_id) rides_requested,
+ COUNT(DISTINCT user_id) unique_users 
+FROM
+ ride_requests;
+--6. What is the average time of a ride from pick up to drop off?
+-- 52 min and 36.73 sec
+SELECT
+ AVG(dropoff_ts - pickup_ts) AS average_ride_duration 
+FROM
+ ride_requests;
+--7. How many rides were accepted by a driver?
+-- 248379
+SELECT
+ COUNT(ride_id) 
+FROM
+ ride_requests 
+WHERE
+ accept_ts IS NOT NULL;
+--8. How many rides did we successfully collect payments and how much was collected?
+-- 212628 and 4251667.61
+SELECT DISTINCT
+ charge_status,
+ COUNT(*),
+ SUM(purchase_amount_usd) 
+FROM
+ transactions 
+GROUP BY
+ 1;
+--9. How many ride requests happened on each platform?
+-- android - 112317, ios - 234693, web - 38467
+SELECT DISTINCT
+ a.platform,
+ COUNT(ride_id) 
+FROM
+ ride_requests r 
+ LEFT JOIN
+ signups s 
+ ON r.user_id = s.user_id 
+ LEFT JOIN
+ app_downloads a 
+ ON s.session_id = a.app_download_key 
+GROUP BY
+ 1;
+--10. What is the drop-off from users signing up to users requesting a ride? 
+-- 29.60%
+WITH cte_signups AS 
+(
+ SELECT DISTINCT
+ user_id 
+ FROM
+ signups 
+)
+,
+cte_ride_request AS 
+(
+ SELECT DISTINCT
+ s.user_id 
+ FROM
+ cte_signups s 
+ INNER JOIN
+ ride_requests r 
+ ON s.user_id = r.user_id 
+)
+,
+cte_funnel AS 
+(
+ SELECT
+ '1' as n,
+ 'signups' AS step,
+ COUNT(user_id) AS users 
+ FROM
+ cte_signups 
+ UNION
+ SELECT
+ '2' as n,
+ 'ride_request' AS step,
+ COUNT(user_id) AS step 
+ FROM
+ cte_ride_request 
+ ORDER BY
+ n 
+)
+SELECT
+ *,
+ lag(users, 1) OVER() AS lag,
+ CAST((lag(users, 1) OVER()::FLOAT - users)*100 / lag(users, 1) OVER() AS NUMERIC(5, 2)) dropp_off 
+FROM
+ cte_funnel;
+-- Developing Metrocar Funnel Metrics
+--1. How many unique users requested a ride through the Metrocar app?
+-- 12406
+SELECT
+ COUNT( DISTINCT 
+ CASE
+ WHEN
+ request_ts IS NOT NULL 
+ THEN
+ user_id 
+ END
+) 
+FROM
+ ride_requests;
+--2. How many unique users completed a ride through the Metrocar app?
+-- 6233
+SELECT
+COUNT( DISTINCT 
+ CASE
+ WHEN
+ dropoff_ts IS NOT NULL 
+ THEN
+ user_id 
+ END
+) 
+FROM
+ ride_requests;
+--3. Of the users that signed up on the app, what percentage these users requested a ride?
+-- 70.4%
+WITH ride_requested AS 
+(
+ SELECT DISTINCT
+ user_id 
+ FROM
+ ride_requests 
+ WHERE
+ request_ts IS NOT NULL 
+)
+,
+total AS 
+(
+ SELECT
+ s.user_id total_users,
+ r.user_id ride_request_users 
+ FROM
+ signups s 
+ LEFT JOIN
+ ride_requested r 
+ ON s.user_id = r.user_id 
+)
+,
+funnel AS 
+(
+ SELECT
+ '1' as n,
+ 'signups' AS step,
+ COUNT(*) AS users 
+ FROM
+ total 
+ UNION
+ SELECT
+ '2' as n,
+ 'ride_request' AS step,
+ COUNT(ride_request_users) AS users 
+ FROM
+ total 
+ ORDER BY
+ n 
+)
+SELECT
+ *,
+lag(users, 1) OVER(),
+ CAST(users::FLOAT*100 / lag(users, 1) OVER() AS NUMERIC(5, 1)) converstion_rate 
+FROM
+ funnel;
+--4. Of the users that signed up on the app, what percentage these users completed a ride?
+-- 35.4%
+WITH cte_signups AS
+(
+ SELECT DISTINCT
+ user_id AS signup 
+ FROM
+ signups 
+)
+,
+cte_request AS 
+(
+ SELECT DISTINCT
+ signup AS requested 
+ FROM
+ cte_signups AS s 
+ LEFT JOIN
+ ride_requests r 
+ ON s.signup = r.user_id 
+ WHERE
+ request_ts IS NOT NULL 
+)
+,
+cte_completed AS 
+(
+ SELECT DISTINCT
+ requested AS completed 
+ FROM
+ cte_request AS cr 
+ LEFT JOIN
+ ride_requests AS rr 
+ ON cr.requested = rr.user_id 
+ WHERE
+ rr.dropoff_ts IS NOT NULL 
+)
+,
+funnel AS 
+(
+ SELECT
+ '1' AS n,
+ 'signup' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_signups 
+ UNION
+ SELECT
+ '2' AS n,
+ 'request' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_request
+ UNION
+ SELECT
+ '3' AS n,
+ 'completed' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_completed 
+ ORDER BY
+ n 
+)
+SELECT
+ *,
+ lag(users, 1) OVER(),
+ FIRST_VALUE(users) OVER(),
+ CAST(users::FLOAT*100 / FIRST_VALUE(users) OVER() AS NUMERIC(5, 1)) AS conversion_rate 
+FROM
+ funnel;
+--5. Using the percent of previous approach, what are the user-level conversion rates for the 
+-- first 3 stages of the funnel (app download to signup and signup to ride requested)?
+-- 74.6% and 70.4%
+WITH cte_downloads AS 
+(
+ SELECT DISTINCT
+ app_download_key AS download 
+ FROM
+ app_downloads 
+)
+,
+cte_signups AS 
+(
+ SELECT DISTINCT
+ s.user_id AS signups 
+ FROM
+ signups AS s 
+ LEFT JOIN
+ cte_downloads AS d 
+ ON d.download = s.session_id 
+)
+,
+cte_request AS 
+(
+ SELECT DISTINCT
+ signups AS request 
+ FROM
+ ride_requests rr 
+ LEFT JOIN
+ cte_signups s 
+ ON rr.user_id = s.signups 
+ WHERE
+ rr.request_ts IS NOT NULL 
+)
+,
+cte_completed AS 
+(
+ SELECT DISTINCT
+request AS completed 
+ FROM
+ ride_requests rr 
+ LEFT JOIN
+ cte_request r 
+ ON rr.user_id = r.request 
+ WHERE
+ rr.dropoff_ts IS NOT NULL 
+)
+,
+funnel AS 
+(
+ SELECT
+ '1' AS n,
+ 'download' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_downloads 
+ UNION
+ SELECT
+ '2' AS n,
+ 'signup' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_signups 
+ UNION
+ SELECT
+ '3' AS n,
+ 'request' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_request 
+ UNION
+ SELECT
+ '4' AS n,
+ 'completed' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_completed 
+ ORDER BY
+ n 
+)
+SELECT
+ *,
+ CAST(users::FLOAT*100 / lag(users, 1) OVER() AS NUMERIC(5, 1)) AS conversion_rate 
+FROM
+ funnel;
+--6. Using the percent of top approach, what are the user-level conversion rates for the first 3 
+-- stages of the funnel (app download to signup and signup to ride requested)?
+-- 74.6% and 52.5%
+WITH cte_downloads AS 
+(
+ SELECT DISTINCT
+ app_download_key AS download 
+ FROM
+ app_downloads ),
+cte_signups AS (
+ SELECT DISTINCT
+ s.user_id AS signups 
+ FROM
+ signups AS s 
+ LEFT JOIN
+ cte_downloads AS d 
+ ON d.download = s.session_id ),
+cte_request AS (
+ SELECT DISTINCT
+ signups AS request 
+ FROM
+ ride_requests rr 
+ LEFT JOIN
+ cte_signups s 
+ ON rr.user_id = s.signups 
+ WHERE
+ rr.request_ts IS NOT NULL ),
+cte_completed AS (
+ SELECT DISTINCT
+ request AS completed 
+ FROM
+ ride_requests rr 
+ LEFT JOIN
+ cte_request r 
+ ON rr.user_id = r.request 
+ WHERE
+ rr.dropoff_ts IS NOT NULL ),
+funnel AS (
+ SELECT
+ '1' AS n,
+ 'download' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_downloads 
+ UNION
+ SELECT
+ '2' AS n,
+ 'signup' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_signups
+UNION
+ SELECT
+ '3' AS n,
+ 'request' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_request 
+ UNION
+ SELECT
+ '4' AS n,
+ 'completed' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_completed 
+ ORDER BY
+ n 
+)
+SELECT
+ *,
+ CAST(users::FLOAT*100 / lag(users, 1) OVER() AS NUMERIC(5, 1)) AS conversion_rate_pop,
+ CAST(users::FLOAT*100 / FIRST_VALUE(users) OVER() AS NUMERIC(5, 1)) AS conversion_rate_pot 
+FROM
+ funnel;
+--7. Using the percent of previous approach, what are the user-level conversion rates for the 
+-- following 3 stages of the funnel? 1. signup, 2. ride requested, 3. ride completed
+-- 70.4% and 50.2%
+WITH cte_downloads AS 
+(
+ SELECT DISTINCT
+ app_download_key AS download 
+ FROM
+ app_downloads 
+)
+,
+cte_signups AS 
+(
+ SELECT DISTINCT
+ s.user_id AS signups 
+ FROM
+ signups AS s 
+ LEFT JOIN
+ cte_downloads AS d 
+ ON d.download = s.session_id 
+)
+,
+cte_request AS 
+(
+ SELECT DISTINCT
+ signups AS request 
+ FROM
+ ride_requests rr
+ LEFT JOIN
+ cte_signups s 
+ ON rr.user_id = s.signups 
+ WHERE
+ rr.request_ts IS NOT NULL 
+)
+,
+cte_completed AS 
+(
+ SELECT DISTINCT
+ request AS completed 
+ FROM
+ ride_requests rr 
+ LEFT JOIN
+ cte_request r 
+ ON rr.user_id = r.request 
+ WHERE
+ rr.dropoff_ts IS NOT NULL 
+)
+,
+funnel AS 
+(
+ SELECT
+ '1' AS n,
+ 'download' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_downloads 
+ UNION
+ SELECT
+ '2' AS n,
+ 'signup' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_signups 
+ UNION
+ SELECT
+ '3' AS n,
+ 'request' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_request 
+ UNION
+ SELECT
+ '4' AS n,
+ 'completed' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_completed 
+ ORDER BY
+ n 
+)
+SELECT
+ *,
+ CAST(users::FLOAT*100 / lag(users, 1) OVER() AS NUMERIC(5, 1)) AS conversion_rate_pop,
+ CAST(users::FLOAT*100 / FIRST_VALUE(users) OVER() AS NUMERIC(5, 1)) AS conversion_rate_pot 
+FROM
+ funnel;
+--8. Using the percent of top approach, what are the user-level conversion rates for the following 
+-- 3 stages of the funnel? 1. signup, 2. ride requested, 3. ride completed (hint: signup is the top 
+-- of this funnel)
+WITH cte_downloads AS 
+(
+ SELECT DISTINCT
+ app_download_key AS download 
+ FROM
+ app_downloads 
+)
+,
+cte_signups AS 
+(
+ SELECT DISTINCT
+ s.user_id AS signups 
+ FROM
+ signups AS s 
+ LEFT JOIN
+ cte_downloads AS d 
+ ON d.download = s.session_id 
+)
+,
+cte_request AS 
+(
+ SELECT DISTINCT
+ signups AS request 
+ FROM
+ ride_requests rr 
+ LEFT JOIN
+ cte_signups s 
+ ON rr.user_id = s.signups 
+ WHERE
+ rr.request_ts IS NOT NULL 
+)
+,
+cte_completed AS 
+(
+ SELECT DISTINCT
+ request AS completed 
+ FROM
+ ride_requests rr 
+ LEFT JOIN
+ cte_request r 
+ ON rr.user_id = r.request 
+ WHERE
+ rr.dropoff_ts IS NOT NULL 
+)
+,
+funnel AS 
+(
+ -- select '1' as n, 'download' as step, count(*) as users from cte_downloads
+ -- union
+ SELECT
+ '1' AS n,
+ 'signup' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_signups 
+ UNION
+ SELECT
+ '2' AS n,
+ 'request' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_request 
+ UNION
+ SELECT
+ '3' AS n,
+ 'completed' AS step,
+ COUNT(*) AS users 
+ FROM
+ cte_completed 
+ ORDER BY
+ n 
+)
+SELECT
+ *,
+ CAST(users::FLOAT*100 / lag(users, 1) OVER() AS NUMERIC(5, 1)) AS conversion_rate_pop,
+ CAST(users::FLOAT*100 / FIRST_VALUE(users) OVER() AS NUMERIC(5, 1)) AS conversion_rate_pot 
+FROM
+ funnel;
+-- Explore the reviews by creating a list of used words to analyze in Tableau
+SELECT REPLACE(REPLACE(TRIM(name_part), '.', ''), ',', '') AS cleaned_name_part
+FROM (
+ SELECT LOWER(unnest(string_to_array(review, ' '))) AS name_part
+ FROM reviews
+ WHERE rating = 1 OR rating = 2
+) subquery
+WHERE REPLACE(REPLACE(TRIM(name_part), '.', ''), ',', '') NOT IN ('the', 'a', 'was', 'and', 'to', 'or', 'ride', 'with', 
+'driver', 'in', 'metrocar', 'took', 'up', 'me', 'ever');
+6. Data Aggregation in SQL
+--Final data aggregation
+WITH user_details AS 
+(
+ SELECT
+ app_download_key,
+ user_id,
+ platform,
+ age_range,
+ DATE(download_ts) AS download_dt 
+ FROM
+ app_downloads 
+ LEFT JOIN
+ signups 
+ ON app_downloads.app_download_key = signups.session_id
+)
+,
+ride_details AS (
+ SELECT
+ ride_id,
+ user_details.* 
+ FROM
+ ride_requests 
+ LEFT JOIN
+ user_details USING(user_id) ),
+downloads AS (
+ SELECT
+ 0 AS step,
+ 'download' AS name,
+ platform,
+ age_range,
+ download_dt,
+ COUNT(DISTINCT app_download_key) AS users_count,
+ 0 AS count_rides 
+ FROM
+ user_details 
+ GROUP BY
+ platform,
+ age_range,
+ download_dt ),
+signup AS (
+ SELECT
+ 1 AS step,
+ 'signup' AS name,
+ user_details.platform,
+ user_details.age_range,
+ user_details.download_dt,
+ COUNT(DISTINCT user_id) AS users_count,
+ 0 AS count_rides 
+ FROM
+ signups 
+ JOIN
+ user_details USING(user_id) 
+ WHERE
+ signup_ts IS NOT NULL 
+ GROUP BY
+ user_details.platform,
+ user_details.age_range,
+ user_details.download_dt ),
+requested AS (
+ SELECT
+ 2,
+25
+ 'ride_requested',
+ user_details.platform,
+ user_details.age_range,
+ user_details.download_dt,
+ COUNT(DISTINCT user_id) AS users_count,
+ COUNT (DISTINCT ride_id) AS count_rides 
+ FROM
+ ride_requests 
+ JOIN
+ user_details USING(user_id) 
+ WHERE
+ request_ts IS NOT NULL 
+ GROUP BY
+ user_details.platform,
+ user_details.age_range,
+ user_details.download_dt ),
+accepted AS (
+ SELECT
+ 3,
+ 'ride_accepted',
+ user_details.platform,
+ user_details.age_range,
+ user_details.download_dt,
+ COUNT(DISTINCT user_id) AS users_count,
+ COUNT (DISTINCT ride_id) AS count_rides 
+ FROM
+ ride_requests 
+ JOIN
+ user_details USING(user_id) 
+ WHERE
+ accept_ts IS NOT NULL 
+ GROUP BY
+ user_details.platform,
+ user_details.age_range,
+ user_details.download_dt ),
+completed AS (
+ SELECT
+ 4,
+ 'ride_completed',
+ user_details.platform,
+ user_details.age_range,
+ user_details.download_dt,
+ COUNT(DISTINCT user_id) AS users_count,
+ COUNT (DISTINCT ride_id) AS count_rides 
+ FROM
+ ride_requests 
+ JOIN
+ user_details USING(user_id) 
+ WHERE
+ dropoff_ts IS NOT NULL 
+ GROUP BY
+ user_details.platform,
+ user_details.age_range,
+ user_details.download_dt ),
+payment AS (
+ SELECT
+ 5,
+ 'payment',
+ ride_details.platform,
+ ride_details.age_range,
+ ride_details.download_dt,
+ COUNT(DISTINCT user_id) AS users_count,
+ COUNT (DISTINCT ride_id) AS count_rides 
+ FROM
+ transactions 
+ LEFT JOIN
+ ride_details USING(ride_id) 
+ WHERE
+ charge_status = 'Approved' 
+ GROUP BY
+ ride_details.platform,
+ ride_details.age_range,
+ ride_details.download_dt ),
+review AS (
+ SELECT
+ 6,
+ 'review',
+ user_details.platform,
+ user_details.age_range,
+ user_details.download_dt,
+ COUNT(DISTINCT user_id) AS users_count,
+ COUNT (DISTINCT ride_id) AS count_rides 
+ FROM
+ reviews 
+ JOIN
+ user_details USING(user_id) 
+ GROUP BY
+ user_details.platform,
+ user_details.age_range,
+ user_details.download_dt )
+SELECT
+ * 
+FROM
+ downloads 
+UNION
+SELECT
+ * 
+FROM
+ signup 
+UNION
+SELECT
+ * 
+FROM
+ requested 
+UNION
+SELECT
+ * 
+FROM
+ accepted 
+UNION
+SELECT
+ * 
+FROM
+ completed 
+UNION
+SELECT
+ * 
+FROM
+ payment 
+UNION
+SELECT
+ * 
+FROM
+ review 
+ORDER BY
+ 1,
+ 2,
+ 3,
+ 4,
+ 5;
+
+
